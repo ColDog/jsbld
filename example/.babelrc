@@ -1,4 +1,3 @@
 {
-  "presets": ["@babel/preset-env", "@babel/preset-react"],
-  "plugins": ["transform-node-env-inline", "minify-dead-code-elimination"]
+  "presets": ["react-app", "minify"],
 }
