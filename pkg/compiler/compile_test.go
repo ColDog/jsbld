@@ -2,7 +2,6 @@ package compiler
 
 import (
 	"testing"
-	"fmt"
 )
 
 func TestExample(t *testing.T) {
@@ -12,12 +11,12 @@ func TestExample(t *testing.T) {
 	}
 }
 
-func TestCompileImports(t *testing.T) {
-	imps, err := compileImports("testdata/imports.js")
-	if fmt.Sprintf("%+v", imps) != "[react react-dom ./cjs/react.production.min.js]" {
-		t.Fatalf("wrong imports: '%+v'", imps)
-	}
-	if err != nil {
-		t.Fatalf("failed: %v", err)
-	}
-}
+// func TestCompileImports(t *testing.T) {
+// 	imps, err := compileImports("../../example/node_modules/react/index.js")
+// 	if err != nil {
+// 		t.Fatalf("failed: %v", err)
+// 	}
+// 	if fmt.Sprintf("%+v", imps) != "[./cjs/react.production.min.js]" {
+// 		t.Fatalf("wrong imports: '%+v'", imps)
+// 	}
+// }

@@ -1,12 +1,6 @@
 package compiler
 
 import (
-	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -15,13 +9,37 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coldog/bld/pkg/util"
+	"github.com/coldog/jsbld/pkg/resolve"
+	"github.com/coldog/jsbld/pkg/util"
 )
 
-var extensions = []string{"js", "jsx", "tsx", "ts"}
+var (
+	BabelCompiler   = "babel $1 --compact=true --config-file=./.babelrc --out-file=$2"
+	DefaultCompiler = "cp $1 $2"
+)
 
-func canCompile(name string) bool {
-	for _, ext := range extensions {
+var Compilers = map[string]string{
+	"js":  BabelCompiler,
+	"jsx": BabelCompiler,
+	"tsx": BabelCompiler,
+	"ts":  BabelCompiler,
+	"*":   DefaultCompiler,
+}
+
+func getCompiler(name, srcFile, dstFile string) []string {
+	spl := strings.Split(name, ".")
+	ext := spl[len(spl)-1]
+	c := Compilers[ext]
+	if c == "" {
+		c = Compilers["*"]
+	}
+	c = strings.Replace(c, "$1", srcFile, 1)
+	c = strings.Replace(c, "$2", dstFile, 1)
+	return strings.Fields(c)
+}
+
+func isJS(name string) bool {
+	for _, ext := range resolve.Extensions {
 		if strings.HasSuffix(name, ext) {
 			return true
 		}
@@ -29,26 +47,28 @@ func canCompile(name string) bool {
 	return false
 }
 
-
-
 // compileFile is very simple in that it takes a file and writes a compiled
 // file.
 func compileFile(src, dst, file string) error {
 	srcFile := filepath.Join(src, file)
 	dstFile := filepath.Join(dst, src, file)
-	os.MkdirAll(filepath.Dir(dstFile), 0700)
+	os.MkdirAll(filepath.Dir(dstFile), 0777)
 
-	var cmd *exec.Cmd
-	if canCompile(file) {
-		cmd = exec.Command(
-			"babel", srcFile,
-			"--compact=true",
-			"--config-file", "./.babelrc",
-			"--out-file", dstFile,
-		)
-	} else {
-		cmd = exec.Command("cp", srcFile, dstFile)
+	object := Object{Filename: dstFile}
+	{
+		prev, _ := ReadObjectFile(dstFile)
+		h, err := hash(srcFile)
+		if err != nil {
+			return err
+		}
+		if prev.Hash == h {
+			return nil
+		}
+		object.Hash = h
 	}
+
+	compiler := getCompiler(file, srcFile, dstFile)
+	cmd := exec.Command(compiler[0], compiler[1:]...)
 
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
@@ -56,61 +76,15 @@ func compileFile(src, dst, file string) error {
 		return err
 	}
 
-	if canCompile(file) {
-		imps, err := compileImports(dstFile)
+	if isJS(file) {
+		imps, err := compileImports(srcFile, dstFile)
 		if err != nil {
 			return err
 		}
-
-		data, err := json.Marshal(imps)
-		if err != nil {
-			return err
-		}
-		err = ioutil.WriteFile(dstFile+".o", data, 0700)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func hash(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	h := sha256.New()
-	_, err = io.Copy(h, f)
-	if err != nil {
-		return "", err
-	}
-	hash := hex.EncodeToString(h.Sum(nil))
-	return hash, nil
-}
-
-func loadState() map[string]string {
-	f, err := os.Open("bld.json")
-	if err != nil {
-		return map[string]string{}
-	}
-	defer f.Close()
-
-	m := map[string]string{}
-	err = json.NewDecoder(f).Decode(&m)
-	if err != nil {
-		log.Printf("failed to read state: %v", err)
-		return map[string]string{}
-	}
-	return m
-}
-
-func saveState(state map[string]string) {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return
+		object.Imports = imps
 	}
 
-	ioutil.WriteFile("bld.json", data, 0700)
+	return WriteObjectFile(object)
 }
 
 type errList struct {
@@ -137,8 +111,6 @@ func (e *errList) first() error {
 func Compile(root, dst string, srcs []string) error {
 	popd := util.Pushd(root)
 	defer popd()
-
-	state := loadState()
 
 	concurrency := 10
 	os.MkdirAll(dst, 0700)
@@ -175,21 +147,10 @@ func Compile(root, dst string, srcs []string) error {
 			if info.IsDir() {
 				return nil
 			}
-			h, err := hash(path)
-			if err != nil {
-				return err
-			}
-			if state[path] == h {
-				log.Printf("compile: %s -- (cached)", path)
-				return nil
-			}
-			state[path] = h
-
 			rel, err := filepath.Rel(src, path)
 			if err != nil {
 				return err
 			}
-
 			paths <- struct {
 				path string
 				src  string
@@ -206,9 +167,5 @@ func Compile(root, dst string, srcs []string) error {
 
 	close(paths)
 	wg.Wait()
-
-	if errs.first() == nil {
-		saveState(state)
-	}
 	return errs.first()
 }

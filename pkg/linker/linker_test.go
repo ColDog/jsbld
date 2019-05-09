@@ -2,12 +2,29 @@ package linker
 
 import (
 	"testing"
-	"fmt"
-	"github.com/coldog/bld/pkg/compiler"
+
+	"github.com/coldog/jsbld/pkg/compiler"
 )
 
 func TestExample(t *testing.T) {
 	compiler.Compile("../../example", "dst", []string{"src", "node_modules"})
-	err := Link("../../example/dst", "./src/index.js", "./bundle.js")
-	fmt.Printf("err: %v", err)
+
+	b := &Bundle{
+		Root:        "../../example/dst",
+		Entrypoints: []string{"./src/index.js"},
+	}
+	err := b.Find()
+	if err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+
+	err = StandardBundler(b)
+	if err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+
+	err = b.Write()
+	if err != nil {
+		t.Fatalf("failed: %v", err)
+	}
 }

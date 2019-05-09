@@ -8,117 +8,119 @@
 package linker
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"bufio"
-	"os"
-	"io"
 	"log"
+	"sort"
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 
-	"github.com/coldog/bld/pkg/util"
+	"github.com/coldog/jsbld/pkg/compiler"
+	"github.com/coldog/jsbld/pkg/util"
 )
 
-var extensions = []string{"js", "jsx", "tsx", "ts"}
-
-
-
-const runtime = `
-var cache = {};
-var modules = {};
-function require(name) {
-  if (cache[name]) {
-    return cache[name].exports;
-  }
-  var module = {
-    name: name,
-    exports: {}
-  };
-  modules[name](module, module.exports, require);
-  cache[name] = module;
-  return module.exports;
-}
-`
-
-func bundle(files map[string]string, entry, output string) error {
-	f, err := os.OpenFile(output, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0700)
-	if err != nil {
-		return err
-	}
-	w := bufio.NewWriter(f)
-
-	w.WriteString("\"use strict\";\n")
-	w.WriteString("(function() {\n")
-	w.WriteString(runtime)
-
-	for name, file := range files {
-		fm, err := os.Open(file)
-		if err != nil {
-			return err
-		}
-		w.WriteString("\n\n/* " + file + " */\n")
-		w.WriteString("modules[\"" + name + "\"] = function(module, exports, require) {")
-		_, err = io.Copy(w, fm)
-		if err != nil {
-			return err
-		}
-		w.WriteString("};\n\n")
-	}
-
-	w.WriteString("require(\"" + entry + "\");\n")
-	w.WriteString("})();\n")
-	return w.Flush()
+type File struct {
+	compiler.Object
+	Entrypoints []string
 }
 
-func Link(root, entrypoint, output string) error {
-	popd := util.Pushd(root)
+type Files map[string]File
+
+func (f Files) Add(file, entrypoint string) {
+	f[file] = File{Entrypoints: append(f[file].Entrypoints, entrypoint)}
+}
+
+func (f Files) SetObject(file string, o compiler.Object) {
+	f[file] = File{Entrypoints: f[file].Entrypoints, Object: o}
+}
+
+func (f Files) Keys() []string {
+	keys := []string{}
+	for k := range f {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+type Chunk struct {
+	Files      Files
+	Entrypoint string
+	Loads      []string
+}
+
+
+func (c Chunk) Output() string {
+	h := sha256.New()
+	for _, f := range c.Files {
+		h.Write([]byte(f.Hash))
+	}
+	hash := hex.EncodeToString(h.Sum(nil))
+	prefix := strings.Split(filepath.Base(c.Entrypoint), ".")[0]
+	return prefix + "-" + hash + ".js"
+}
+
+type Bundle struct {
+	Root        string
+	Files       Files
+	Entrypoints []string
+	Chunks      []*Chunk
+}
+
+func (b *Bundle) Write() error {
+	popd := util.Pushd(b.Root)
 	defer popd()
 
-	resolved, err := resolve(root, entrypoint)
-	if err != nil {
-		return err
+	for _, chunk := range b.Chunks {
+		log.Printf("writing: %s", chunk.Output())
+		var err error
+		if chunk.Entrypoint != "" {
+			err = bundle(chunk.Files, chunk.Entrypoint, chunk.Output(), chunk.Loads)
+		} else {
+			err = bundleChunk(chunk.Files, chunk.Output())
+		}
+		if err != nil {
+			return err
+		}
 	}
-
-	// Map of files to resolved location on disk.
-	files := map[string]string{
-		entrypoint: resolved,
-	}
-
-	if err := parse(files, resolved); err != nil {
-		return err
-	}
-	return bundle(files, entrypoint, output)
+	return nil
 }
 
+func (b *Bundle) Find() error {
+	popd := util.Pushd(b.Root)
+	defer popd()
+
+	b.Files = Files{}
+	for _, entrypoint := range b.Entrypoints {
+		b.Files.Add(entrypoint, entrypoint)
+
+		if err := parse(b.Files, entrypoint, entrypoint); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Loads files into the files map and traverses child dependencies.
-func parse(files map[string]string, file string) error {
-	data, err := ioutil.ReadFile(file + ".o")
+func parse(files Files, file, entrypoint string) error {
+	o, err := compiler.ReadObjectFile(file)
 	if err != nil {
 		return err
 	}
-	requires := []string{}
-	err = json.Unmarshal(data, &requires)
-	if err != nil {
-		return err
-	}
+	files.SetObject(file, o)
 
-	for _, require := range requires {
+	for _, require := range o.Imports {
 		if _, ok := files[require]; ok {
 			continue
 		}
 
-		resolved, err := resolve(filepath.Dir(file), require)
-		log.Printf("resolve: %s", resolved)
-
+		log.Printf("resolve: %s", require)
 		if err != nil {
 			return err
 		}
 
-		files[require] = resolved
-		err = parse(files, resolved)
+		files.Add(require, entrypoint)
+		err = parse(files, require, entrypoint)
 		if err != nil {
 			return err
 		}
